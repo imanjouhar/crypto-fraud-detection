@@ -1,0 +1,80 @@
+name: AML Model Retraining Pipeline
+
+on:
+  schedule:
+    - cron: '0 2 1 * *'
+  push:
+    paths:
+      - 'data/**'
+  workflow_dispatch:
+    inputs:
+      force_retrain:
+        description: 'Force retraining regardless of drift'
+        required: false
+        default: 'false'
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    outputs:
+      drift_detected: ${{ steps.drift.outputs.drift_detected }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - id: drift
+        run: |
+          python -c "
+          from main import load_elliptic, prepare_features, detect_drift
+          import joblib
+          df, _ = load_elliptic()
+          scaler = joblib.load('models/scaler.pkl')
+          pca = joblib.load('models/pca.pkl')
+          X, _, _ = prepare_features(df, scaler=scaler, pca=pca, fit=False)
+          result = detect_drift(X)
+          print('drift_detected=' + str(result['drift_detected']))
+          " >> $GITHUB_OUTPUT
+
+  retrain:
+    needs: drift-check
+    runs-on: ubuntu-latest
+    if: |
+      needs.drift-check.outputs.drift_detected == 'True' ||
+      github.event.inputs.force_retrain == 'true' ||
+      github.event.schedule != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python main.py train
+      - run: python main.py baseline
+      - run: |
+          python -c "
+          import joblib
+          model = joblib.load('models/aml_model.pkl')
+          features = joblib.load('models/feature_cols.pkl')
+          print(f'Model OK - {len(features)} features')
+          "
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          git add models/
+          git diff --staged --quiet || git commit -m "retrain model [$(date +%Y-%m-%d)]"
+          git push
+
+  deploy:
+    needs: retrain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t aml-fraud-api:latest .
+      - run: |
+          docker run -d --name aml-test -p 5000:5000 aml-fraud-api:latest
+          sleep 5
+          curl -f http://localhost:5000/health || exit 1
+          docker stop aml-test
+          echo "Deploy OK"
