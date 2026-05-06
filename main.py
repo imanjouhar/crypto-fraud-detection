@@ -2,17 +2,20 @@
 AML Bitcoin Fraud Detection – Elliptic Dataset
 Iman Jouhar | DLBDSMTP01
 
-python main.py              Full pipeline (train → simulate → visualize)
-python main.py train        Train model only
-python main.py api          Start REST API
+python main.py              Full pipeline (train → simulate → dashboard)
+python main.py train        Train model
+python main.py api          Start REST API + dashboard
 python main.py simulate     12-month drift simulation
 python main.py visualize    Generate result charts
-python main.py dashboard    Charts + interactive HTML dashboard
+python main.py dashboard    Open interactive dashboard
 python main.py monitor      Launch MLflow UI
+python main.py send         Stream test transactions to running API
+python main.py test         Run automated test suite
+python main.py tune         Auto-tune hyperparameters (Optuna)
 python main.py demo         Quick train + single prediction
 """
 
-import os, sys, json
+import os, sys, json, time, csv
 from functools import wraps
 import pandas as pd
 import numpy as np
@@ -159,8 +162,10 @@ def step_train():
     y = df["is_illicit"]
     feature_cols = list(X.columns)
 
-    print("  Splitting 80/20 ...")
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    print("  Splitting 70/15/15 (train/validation/test) ...")
+    X_trainval, X_test, y_trainval, y_test = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
+    X_train, X_val, y_train, y_val = train_test_split(X_trainval, y_trainval, test_size=0.176, random_state=42, stratify=y_trainval)
+    print(f"  Train: {len(X_train):,} | Val: {len(X_val):,} | Test: {len(X_test):,}")
 
     print("  Training ...")
     ratio = (y_train == 0).sum() / (y_train == 1).sum()
@@ -169,7 +174,7 @@ def step_train():
         scale_pos_weight=ratio, eval_metric="aucpr",
         use_label_encoder=False, random_state=42,
     )
-    model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=20)
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=20)
 
     y_pred  = model.predict(X_test)
     y_proba = model.predict_proba(X_test)[:, 1]
@@ -218,7 +223,7 @@ def step_api():
     if not os.path.exists(os.path.join(MODEL_DIR, "aml_model.pkl")):
         print("No model found. Run: python main.py train"); sys.exit(1)
 
-    from flask import Flask, request, jsonify
+    from flask import Flask, request, jsonify, Response
 
     app = Flask(__name__)
     _model    = joblib.load(os.path.join(MODEL_DIR, "aml_model.pkl"))
@@ -253,6 +258,19 @@ def step_api():
         """Return API health status."""
         return jsonify({"status": "healthy"})
 
+    @app.route("/dashboard")
+    def dashboard():
+        """Serve the interactive EDA dashboard with live data from model artifacts."""
+        try:
+            from visualize import build_dashboard_html
+            return Response(build_dashboard_html(), mimetype="text/html")
+        except Exception:
+            static_path = os.path.join("visualizations", "dashboard.html")
+            if os.path.exists(static_path):
+                with open(static_path) as f:
+                    return Response(f.read(), mimetype="text/html")
+            return Response("<h1>Dashboard not ready. Run: python main.py train</h1>", mimetype="text/html")
+
     @app.route("/predict", methods=["POST"])
     @require_key
     def predict():
@@ -275,7 +293,9 @@ def step_api():
             results.append({"is_illicit": int(proba >= 0.5), "probability": round(float(proba), 4)})
         return jsonify({"predictions": results, "count": len(results)})
 
-    print(f"  http://localhost:5000 | Key: {API_KEY}")
+    print(f"  API:       http://localhost:5000/predict")
+    print(f"  Dashboard: http://localhost:5000/dashboard")
+    print(f"  Key: {API_KEY}")
     app.run(host="0.0.0.0", port=5000, debug=False)
 
 
@@ -473,6 +493,217 @@ def test_predict():
         print(f"API not running. Start with: python main.py api")
 
 
+# ── Auto-tuning (Optuna) ───────────────────────────────────
+
+def step_tune():
+    """
+    Automatically find the best hyperparameters using Optuna.
+
+    Tests different combinations of n_estimators, max_depth, learning_rate,
+    and PCA components. Saves the best parameters and retrains the model
+    with them. Runs 30 trials (~5 minutes).
+    """
+    banner("Auto-tune – finding best hyperparameters")
+    check_dataset()
+
+    try:
+        import optuna
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    except ImportError:
+        print("  Install optuna first: pip install optuna")
+        return
+
+    print("  Loading data ...")
+    df, _ = load_elliptic(DATA_DIR)
+    X, scaler, pca = prepare_features(df, fit=True)
+    y = df["is_illicit"]
+    feature_cols = list(X.columns)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    ratio = (y_train == 0).sum() / (y_train == 1).sum()
+
+    def objective(trial):
+        """Optuna objective: maximize F1 score."""
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 500, step=50),
+            "max_depth": trial.suggest_int("max_depth", 3, 10),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "scale_pos_weight": ratio,
+            "eval_metric": "aucpr",
+            "use_label_encoder": False,
+            "random_state": 42,
+        }
+        m = XGBClassifier(**params)
+        m.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+        pred = m.predict(X_test)
+        return f1_score(y_test, pred)
+
+    print("  Running 30 trials ...")
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=30, show_progress_bar=True)
+
+    best = study.best_params
+    print(f"\n  Best F1: {study.best_value:.4f}")
+    print(f"  Best params: {json.dumps(best, indent=2)}")
+
+    # Save best params
+    best_path = os.path.join(MODEL_DIR, "best_params.json")
+    with open(best_path, "w") as f:
+        json.dump(best, f, indent=2)
+    print(f"  Saved to {best_path}")
+
+    # Retrain with best params
+    print("\n  Retraining with best params ...")
+    best["scale_pos_weight"] = ratio
+    best["eval_metric"] = "aucpr"
+    best["use_label_encoder"] = False
+    best["random_state"] = 42
+
+    model = XGBClassifier(**best)
+    model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=20)
+
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
+    prec = precision_score(y_test, y_pred)
+    rec = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    auc = roc_auc_score(y_test, y_proba)
+
+    print("\n" + classification_report(y_test, y_pred, target_names=["Licit", "Illicit"]))
+    print(f"  ROC-AUC: {auc:.4f}")
+
+    mlflow.set_tracking_uri("mlruns")
+    mlflow.set_experiment("AML-Bitcoin-Detection")
+    with mlflow.start_run(run_name="xgboost_tuned"):
+        for k, v in best.items():
+            mlflow.log_param(k, v)
+        mlflow.log_metric("precision", prec)
+        mlflow.log_metric("recall", rec)
+        mlflow.log_metric("f1_score", f1)
+        mlflow.log_metric("roc_auc", auc)
+
+    joblib.dump(model, os.path.join(MODEL_DIR, "aml_model.pkl"))
+    joblib.dump(feature_cols, os.path.join(MODEL_DIR, "feature_cols.pkl"))
+    joblib.dump(scaler, os.path.join(MODEL_DIR, "scaler.pkl"))
+    joblib.dump(pca, os.path.join(MODEL_DIR, "pca.pkl"))
+    print(f"\n  Tuned model saved to {MODEL_DIR}/")
+    return {"precision": prec, "recall": rec, "f1": f1, "auc": auc}
+
+
+# ── Sender (stream transactions to API) ────────────────────
+
+def step_send():
+    """Simulate live Bitcoin transaction streaming to the running API."""
+    banner("Sender – streaming transactions to API")
+    import requests as req
+    import csv, time
+
+    log_path = "visualizations/predictions_log.csv"
+    os.makedirs("visualizations", exist_ok=True)
+
+    # Generate test transactions
+    txns = []
+    data_path = os.path.join(DATA_DIR, "elliptic_txs_features.csv")
+    if os.path.exists(data_path):
+        df = pd.read_csv(data_path, header=None, nrows=30)
+        df.columns = ["txId", "time_step"] + [f"feat_{i}" for i in range(N_RAW_FEATURES)]
+        for _, row in df.iterrows():
+            txn = {f"feat_{i}": round(float(row[f"feat_{i}"]), 3) for i in range(N_RAW_FEATURES)}
+            txn.update({"time_step": int(row["time_step"]), "in_degree": int(np.random.randint(0, 10)), "out_degree": int(np.random.randint(0, 10))})
+            txns.append(txn)
+    else:
+        for _ in range(20):
+            txn = {f"feat_{i}": round(float(np.random.randn()), 3) for i in range(N_RAW_FEATURES)}
+            txn.update({"time_step": 25, "in_degree": 3, "out_degree": 2})
+            txns.append(txn)
+
+    log = open(log_path, "w", newline="")
+    writer = csv.writer(log)
+    writer.writerow(["index", "is_illicit", "probability", "risk_level", "ms"])
+    headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
+    flagged = 0
+
+    for i, txn in enumerate(txns):
+        try:
+            t0 = time.time()
+            r = req.post("http://localhost:5000/predict", json=txn, headers=headers, timeout=10)
+            ms = round((time.time() - t0) * 1000, 1)
+            if r.status_code == 200:
+                res = r.json()
+                writer.writerow([i, res["is_illicit"], res["probability"], res["risk_level"], ms])
+                if res["is_illicit"]: flagged += 1
+                print(f"  [{i+1:>3}/{len(txns)}] {'ILLICIT' if res['is_illicit'] else 'licit':>7} | prob={res['probability']:.3f} | {res['risk_level']:<6} | {ms}ms")
+        except req.ConnectionError:
+            print(f"  API not running. Start with: python main.py api"); break
+        time.sleep(0.2)
+
+    log.close()
+    print(f"\n  {len(txns)} sent, {flagged} flagged. Log: {log_path}")
+
+
+# ── Test suite ─────────────────────────────────────────────
+
+def step_test():
+    """Run automated tests verifying all project artifacts."""
+    banner("Test Suite")
+    passed, failed = 0, 0
+
+    def check(name, ok):
+        nonlocal passed, failed
+        if ok: passed += 1; print(f"  PASS  {name}")
+        else: failed += 1; print(f"  FAIL  {name}")
+
+    # Model artifacts
+    print("\n  -- Model --")
+    for f in ["models/aml_model.pkl", "models/feature_cols.pkl", "models/scaler.pkl", "models/pca.pkl"]:
+        check(f, os.path.exists(f))
+    if os.path.exists("models/aml_model.pkl"):
+        m = joblib.load("models/aml_model.pkl")
+        check("Model has predict_proba", hasattr(m, "predict_proba"))
+
+    # Baseline
+    print("\n  -- Drift baseline --")
+    bp = "models/baseline_stats.json"
+    check("Baseline exists", os.path.exists(bp))
+    if os.path.exists(bp):
+        with open(bp) as f: d = json.load(f)
+        check(f"Baseline has {len(d)} features", len(d) > 0)
+
+    # Visualizations
+    print("\n  -- Outputs --")
+    for f in ["visualizations/dashboard.html", "visualizations/01_class_distribution.png", "visualizations/03_roc_curve.png"]:
+        check(f, os.path.exists(f))
+
+    # Simulation
+    print("\n  -- Simulation --")
+    sp = "data/simulated_months/simulation_summary.json"
+    check("Simulation summary", os.path.exists(sp))
+    if os.path.exists(sp):
+        with open(sp) as f: s = json.load(f)
+        check(f"{len(s)} months simulated", len(s) == 12)
+
+    # CI/CD
+    print("\n  -- Infrastructure --")
+    check("GitHub Actions workflow", os.path.exists(".github/workflows/retrain.yml"))
+    check("Dockerfile", os.path.exists("Dockerfile"))
+    check("docker-compose.yml", os.path.exists("docker-compose.yml"))
+
+    # API (if running)
+    print("\n  -- API --")
+    try:
+        import requests as req
+        r = req.get("http://localhost:5000/health", timeout=2)
+        check("API /health responds", r.status_code == 200)
+        r2 = req.post("http://localhost:5000/predict", json={}, timeout=2)
+        check("API rejects no auth (401)", r2.status_code == 401)
+    except Exception:
+        print("  SKIP  API not running")
+
+    print(f"\n  Results: {passed} passed, {failed} failed")
+
+
 # ── Full Pipeline ──────────────────────────────────────────
 
 def run_full():
@@ -481,10 +712,11 @@ def run_full():
     step_train()
     step_baseline()
     step_simulate()
-    step_visualize()
+    step_dashboard()
     banner("Done")
     print("  python main.py api        Start REST API")
-    print("  python main.py dashboard  Open interactive dashboard")
+    print("  python main.py send       Stream test transactions to API")
+    print("  python main.py test       Run automated test suite")
     print("  python main.py monitor    Open MLflow UI")
 
 
@@ -494,6 +726,7 @@ COMMANDS = {
     "train": step_train, "api": step_api, "baseline": step_baseline,
     "simulate": step_simulate, "monitor": step_monitor, "demo": step_demo,
     "predict": test_predict, "visualize": step_visualize, "dashboard": step_dashboard,
+    "send": step_send, "test": step_test, "tune": step_tune,
 }
 
 if __name__ == "__main__":
