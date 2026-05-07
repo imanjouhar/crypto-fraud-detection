@@ -334,6 +334,50 @@ tbody td{{padding:0.6rem 1rem;border-bottom:1px solid #f1f5f9}}tbody tr:hover{{b
   <p class="caption"><strong>How to read:</strong> Green = correct, red = errors. TN (top-left): licit transactions correctly cleared — no action needed. TP (bottom-right): illicit transactions correctly caught — flagged for investigation. FP (bottom-left): licit transactions falsely flagged — wastes analyst time but causes no harm. FN (top-right): illicit transactions missed — the most dangerous error, money laundering goes undetected.<br><br><strong>In AML practice:</strong> Regulators care most about minimizing FN (missed illicit). Banks accept some FP (false alarms) as a cost of compliance. The model's recall score directly reflects the FN rate.</p>
 </div>
 
+<h2><span class="dot"></span> REST API — 7 endpoints serving the model</h2>
+<div class="card-full" style="padding:2rem">
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1rem">
+    <div style="background:#f0fdf4;border:1px solid #16a34a;border-radius:10px;padding:1rem;text-align:center">
+      <div style="font-size:0.7rem;color:#16a34a;font-weight:600;text-transform:uppercase;letter-spacing:1px">GET</div>
+      <div style="font-family:JetBrains Mono,monospace;font-size:1.1rem;color:#0F1B2D;font-weight:600;margin:0.4rem 0">/health</div>
+      <div style="font-size:0.75rem;color:#64748B">API status check<br>No auth required</div>
+    </div>
+    <div style="background:#eff6ff;border:1px solid #2563eb;border-radius:10px;padding:1rem;text-align:center">
+      <div style="font-size:0.7rem;color:#2563eb;font-weight:600;text-transform:uppercase;letter-spacing:1px">GET</div>
+      <div style="font-family:JetBrains Mono,monospace;font-size:1.1rem;color:#0F1B2D;font-weight:600;margin:0.4rem 0">/dashboard</div>
+      <div style="font-size:0.75rem;color:#64748B">Interactive EDA<br>Live refresh</div>
+    </div>
+    <div style="background:#f0fdfa;border:1px solid #0d9488;border-radius:10px;padding:1rem;text-align:center">
+      <div style="font-size:0.7rem;color:#0d9488;font-weight:600;text-transform:uppercase;letter-spacing:1px">POST</div>
+      <div style="font-family:JetBrains Mono,monospace;font-size:1.1rem;color:#0F1B2D;font-weight:600;margin:0.4rem 0">/predict</div>
+      <div style="font-size:0.75rem;color:#64748B">Score transaction<br>Returns probability + risk</div>
+    </div>
+    <div style="background:#f0fdfa;border:1px solid #0d9488;border-radius:10px;padding:1rem;text-align:center">
+      <div style="font-size:0.7rem;color:#0d9488;font-weight:600;text-transform:uppercase;letter-spacing:1px">POST</div>
+      <div style="font-family:JetBrains Mono,monospace;font-size:1.1rem;color:#0F1B2D;font-weight:600;margin:0.4rem 0">/predict/batch</div>
+      <div style="font-size:0.75rem;color:#64748B">Score multiple<br>Bulk processing</div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem">
+    <div style="background:#fffbeb;border:1px solid #d97706;border-radius:10px;padding:1rem;text-align:center">
+      <div style="font-size:0.7rem;color:#d97706;font-weight:600;text-transform:uppercase;letter-spacing:1px">GET</div>
+      <div style="font-family:JetBrains Mono,monospace;font-size:1.1rem;color:#0F1B2D;font-weight:600;margin:0.4rem 0">/model/info</div>
+      <div style="font-size:0.75rem;color:#64748B">Model metadata, version<br>Training timestamp</div>
+    </div>
+    <div style="background:#fef2f2;border:1px solid #dc2626;border-radius:10px;padding:1rem;text-align:center">
+      <div style="font-size:0.7rem;color:#dc2626;font-weight:600;text-transform:uppercase;letter-spacing:1px">GET</div>
+      <div style="font-family:JetBrains Mono,monospace;font-size:1.1rem;color:#0F1B2D;font-weight:600;margin:0.4rem 0">/alerts</div>
+      <div style="font-size:0.75rem;color:#64748B">Drift alert history<br>Feature-level detail</div>
+    </div>
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:1rem;text-align:center">
+      <div style="font-size:0.7rem;color:#64748B;font-weight:600;text-transform:uppercase;letter-spacing:1px">ALL</div>
+      <div style="font-family:JetBrains Mono,monospace;font-size:1.1rem;color:#0F1B2D;font-weight:600;margin:0.4rem 0">X-API-Key</div>
+      <div style="font-size:0.75rem;color:#64748B">Auth required on<br>/predict, /model, /alerts</div>
+    </div>
+  </div>
+  <p class="caption" style="margin-top:1rem"><strong>Access control:</strong> Prediction and monitoring endpoints require an API key via the X-API-Key header. Unauthorized requests are logged with source IP and rejected with HTTP 401. The /health and /dashboard endpoints are public for load balancer checks and stakeholder access.</p>
+</div>
+
 <h2><span class="dot"></span> System architecture — from raw data to production deployment</h2>
 <div class="card-full" style="padding:2rem;overflow-x:auto">
 <svg width="100%" viewBox="0 0 920 580" style="max-width:920px;margin:0 auto;display:block">
