@@ -77,7 +77,6 @@ jobs:
           sleep 5
           curl -f http://localhost:5000/health || exit 1
           docker stop aml-test
-          echo "Deploy OK"
-
+          echo "Smoke test passed"
       - name: Deploy to Render
         run: curl -s "${{ secrets.RENDER_DEPLOY_HOOK }}"
