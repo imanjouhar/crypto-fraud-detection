@@ -1,5 +1,5 @@
 """
-AML Bitcoin Fraud Detection – Elliptic Dataset
+AML Crypto Fraud Detection – Elliptic Bitcoin Dataset
 Iman Jouhar | DLBDSMTP01
 
 python main.py              Full pipeline (train → simulate → dashboard)
@@ -188,7 +188,7 @@ def step_train():
     print(f"  Confusion Matrix:\n{confusion_matrix(y_test, y_pred)}")
 
     mlflow.set_tracking_uri("mlruns")
-    mlflow.set_experiment("AML-Bitcoin-Detection")
+    mlflow.set_experiment("Crypto-Fraud-Detection")
     with mlflow.start_run(run_name="xgboost_elliptic_pca"):
         mlflow.log_param("n_estimators", 200)
         mlflow.log_param("max_depth", 6)
@@ -575,7 +575,7 @@ def step_tune():
     print(f"  ROC-AUC: {auc:.4f}")
 
     mlflow.set_tracking_uri("mlruns")
-    mlflow.set_experiment("AML-Bitcoin-Detection")
+    mlflow.set_experiment("Crypto-Fraud-Detection")
     with mlflow.start_run(run_name="xgboost_tuned"):
         for k, v in best.items():
             mlflow.log_param(k, v)
@@ -708,7 +708,7 @@ def step_test():
 
 def run_full():
     """Execute the complete MLOps pipeline: train, baseline, simulate, visualize."""
-    banner("AML Bitcoin Fraud Detection – Full Pipeline")
+    banner("Crypto Fraud Detection – Full Pipeline")
     step_train()
     step_baseline()
     step_simulate()

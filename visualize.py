@@ -157,6 +157,8 @@ def build_dashboard_html():
     fi_labels = "[]"
     fi_values = "[]"
     fi_n95 = 0
+    dbscan_json = "[]"
+    dbscan_n = 0
     cm_json = "[[0,0],[0,0]]"
     roc_json = '{"fpr":[],"tpr":[],"auc":0}'
     pr_json = '{"rec":[],"prec":[],"auc":0}'
@@ -194,10 +196,26 @@ def build_dashboard_html():
         y_sample = y.iloc[sample_idx].values
         pca_points = [{"x": round(float(X_2d[i,0]),2), "y": round(float(X_2d[i,1]),2), "z": round(float(X_2d[i,2]),2), "c": int(y_sample[i])} for i in range(sample_n)]
         pca_json = json.dumps(pca_points)
+
+        # DBSCAN clustering on illicit transactions
+        from sklearn.cluster import DBSCAN
+        ill_mask = y_sample == 1
+        if ill_mask.sum() > 10:
+            X_ill = X_2d[ill_mask]
+            db = DBSCAN(eps=1.5, min_samples=5)
+            clusters = db.fit_predict(X_ill)
+            n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
+            dbscan_points = [{"x": round(float(X_ill[i,0]),2), "y": round(float(X_ill[i,1]),2),
+                              "z": round(float(X_ill[i,2]),2), "cl": int(clusters[i])} for i in range(len(X_ill))]
+            dbscan_json = json.dumps(dbscan_points)
+            dbscan_n = n_clusters
+        else:
+            dbscan_json = "[]"
+            dbscan_n = 0
         imp = model.feature_importances_
         top_idx = np.argsort(imp)[-15:][::-1]
         fi_labels = json.dumps([feature_cols[i] for i in top_idx])
-        fi_values = json.dumps([round(float(imp[i]),4) for i in top_idx])
+        fi_values = json.dumps([round(float(imp[i].item()) / float(imp.sum().item()) * 100, 1) for i in top_idx])
         # Calculate how many features capture 95% of total importance
         sorted_imp = np.sort(imp)[::-1]
         cum_imp = np.cumsum(sorted_imp) / sorted_imp.sum()
@@ -254,7 +272,7 @@ tbody td{{padding:0.6rem 1rem;border-bottom:1px solid #f1f5f9}}tbody tr:hover{{b
 <body>
 
 <div class="topbar">
-  <h1>AML Bitcoin Fraud Detection</h1>
+  <h1>Crypto Fraud Detection</h1>
   <div style="display:flex;gap:0.5rem;align-items:center">
     <span class="tag">Elliptic Dataset</span>
     <span class="tag">XGBoost + PCA</span>
@@ -262,13 +280,14 @@ tbody td{{padding:0.6rem 1rem;border-bottom:1px solid #f1f5f9}}tbody tr:hover{{b
     <button onclick="location.reload()" style="background:#fff;color:#0F1B2D;border:none;padding:0.4rem 1rem;border-radius:20px;font-family:DM Sans;font-size:0.8rem;font-weight:600;cursor:pointer;margin-left:0.5rem;transition:background 0.2s" onmouseover="this.style.background='#f0fdfa'" onmouseout="this.style.background='#fff'">&#x21bb; Refresh data</button>
   </div>
 </div>
-<div style="background:#0F1B2D;padding:0.3rem 3rem;border-top:1px solid rgba(255,255,255,0.05)">
-  <span style="color:#475569;font-size:0.7rem">Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</span>
+<div style="background:#0F1B2D;padding:0.5rem 3rem;border-top:1px solid rgba(255,255,255,0.05)">
+  <span style="color:#94a3b8;font-size:0.8rem">Objective: Detect illicit cryptocurrency transactions using machine learning, with automated retraining to adapt to evolving criminal tactics.</span>
+  <span style="color:#475569;font-size:0.7rem;margin-left:1rem">Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</span>
 </div>
 
 <div class="container">
 
-<h2><span class="dot"></span> Dataset overview</h2>
+<h2><span class="dot"></span> Elliptic Bitcoin Dataset — 203K real blockchain transactions (2017–2018)</h2>
 <div class="stats">
   <div class="stat"><div class="val" style="color:#0D9488">{total:,}</div><div class="label">Labeled transactions</div></div>
   <div class="stat"><div class="val" style="color:#16a34a">{n_lic:,}</div><div class="label">Licit (legitimate)</div></div>
@@ -276,7 +295,7 @@ tbody td{{padding:0.6rem 1rem;border-bottom:1px solid #f1f5f9}}tbody tr:hover{{b
   <div class="stat"><div class="val" style="color:#d97706">{n_ill/total*100:.1f}%</div><div class="label">Illicit ratio</div></div>
 </div>
 
-<h2><span class="dot"></span> Model performance</h2>
+<h2><span class="dot"></span> Model performance — XGBoost classifier on 46K labeled transactions</h2>
 <div class="grid2">
   <div class="card"><h3>Radar overview</h3><div id="radarChart"></div>
     <p class="caption"><strong>Why these 4 metrics:</strong> Accuracy alone is misleading with 90/10 class imbalance — a model predicting everything as licit would be 90% accurate but useless. Precision measures false alarm rate. Recall measures how many illicit transactions are caught. F1 balances both. AUC measures overall ranking quality regardless of threshold choice.</p>
@@ -286,32 +305,36 @@ tbody td{{padding:0.6rem 1rem;border-bottom:1px solid #f1f5f9}}tbody tr:hover{{b
   </div>
 </div>
 
-<h2><span class="dot"></span> Exploratory data analysis</h2>
+<h2><span class="dot"></span> Exploratory data analysis — understanding the fraud landscape</h2>
 <div class="grid2">
   <div class="card"><h3>Class distribution</h3><div id="classChart"></div>
-    <p class="caption"><strong>The core challenge:</strong> Only ~10% of labeled transactions are illicit. A naive model predicting everything as licit would score 90% accuracy but catch zero fraud. This is why the model uses scale_pos_weight to penalize missed illicit transactions ~9x more than false alarms, and why we evaluate with recall and F1 instead of accuracy.</p>
+    <p class="caption"><strong>The core challenge:</strong> Only ~10% of labeled transactions are illicit. A naive model predicting everything as licit would score 90% accuracy but catch zero fraud. This is why the model uses scale_pos_weight to penalize missed illicit transactions ~9x more than false alarms, and why the evaluation focuses on recall and F1 instead of accuracy.</p>
   </div>
-  <div class="card"><h3>Illicit activity over time</h3><div id="tsChart"></div>
+  <div class="card"><h3>Illicit activity across 2 years (2017–2018) — 49 time steps</h3><div id="tsChart"></div>
     <p class="caption"><strong>What this shows:</strong> The Elliptic dataset spans 49 time steps (~2 weeks each, roughly 2 years of Bitcoin activity). The bars show how many transactions occurred per period, the red line shows what percentage were illicit.<br><br><strong>Why it matters:</strong> Criminal activity is not constant — it spikes during specific periods (new laundering schemes, enforcement gaps). This temporal pattern is why the model includes time_step as a feature, and why the MLOps pipeline needs drift detection to catch when these patterns shift.</p>
   </div>
 </div>
 
-<h2><span class="dot"></span> Feature space</h2>
+<h2><span class="dot"></span> Feature space — how the model sees transactions</h2>
 <div class="card-wide"><h3>PCA projection — 3D interactive view</h3><div id="pcaChart" style="height:550px"></div>
   <p class="caption"><strong>Why PCA:</strong> The original dataset has 165 anonymized features per transaction — too many to visualize or for the model to process efficiently. PCA compresses them into 30 components that retain ~85% of the information, reducing noise and speeding up training by 5x.<br><br><strong>What this shows:</strong> All 165 features compressed into 3 dimensions. Each dot is one Bitcoin transaction. Drag to rotate. Where red dots cluster separately from teal, the model can distinguish illicit from licit transactions. Where they overlap, classification is harder — those are the borderline cases that drive false positives and false negatives in the confusion matrix above.<br><br><strong>Result:</strong> The visible separation confirms that illicit transactions do have distinct feature patterns (different amounts, timing, network connections) that the model can learn. Without this separation, no classifier would work.</p>
+</div>
+
+<div class="card-wide"><h3>DBSCAN clustering — illicit transaction subtypes</h3><div id="dbscanChart" style="height:500px"></div>
+  <p class="caption"><strong>Why DBSCAN:</strong> The PCA view shows illicit transactions cluster tightly. DBSCAN (Density-Based Spatial Clustering) identifies distinct groups within the illicit class without requiring a pre-defined number of clusters. Each color represents a different criminal campaign or behavior pattern. Noise points (gray) are outliers that do not fit any pattern — potentially novel laundering techniques.<br><br><strong>Result:</strong> {dbscan_n} distinct clusters found among illicit transactions. This suggests multiple types of criminal activity in the dataset (e.g., ransomware, darknet markets, mixer services). A production system could use these clusters to prioritize investigation by campaign type.</p>
 </div>
 
 <div class="card-wide"><h3>Feature importance — top 15</h3><div id="fiChart" style="height:450px"></div>
   <p class="caption"><strong>What this shows:</strong> Which of the 33 model inputs (30 PCA components + 3 graph features) have the most influence on the model's decisions. The top {fi_n95} features capture 95% of total predictive power — the rest contribute marginally.<br><br><strong>In practice:</strong> PCA components are compressed representations of the original 165 blockchain features (transaction amounts, timing patterns, aggregated neighbor stats). Graph features (in_degree = how many transactions send to this one, out_degree = how many it sends to) capture network structure. High importance on graph features means the model is learning that connected transaction patterns matter — which is exactly how money laundering works (layering through chains of transactions).</p>
 </div>
 
-<h2><span class="dot"></span> Model evaluation</h2>
+<h2><span class="dot"></span> Model evaluation — where the classifier gets it right and wrong</h2>
 <div class="card-wide"><h3>Confusion matrix</h3>
   <div id="cmChart" style="height:400px"></div>
   <p class="caption"><strong>How to read:</strong> Green = correct, red = errors. TN (top-left): licit transactions correctly cleared — no action needed. TP (bottom-right): illicit transactions correctly caught — flagged for investigation. FP (bottom-left): licit transactions falsely flagged — wastes analyst time but causes no harm. FN (top-right): illicit transactions missed — the most dangerous error, money laundering goes undetected.<br><br><strong>In AML practice:</strong> Regulators care most about minimizing FN (missed illicit). Banks accept some FP (false alarms) as a cost of compliance. The model's recall score directly reflects the FN rate.</p>
 </div>
 
-<h2><span class="dot"></span> System architecture</h2>
+<h2><span class="dot"></span> System architecture — from raw data to production deployment</h2>
 <div class="card-full" style="padding:2rem;overflow-x:auto">
 <svg width="100%" viewBox="0 0 920 580" style="max-width:920px;margin:0 auto;display:block">
   <defs>
@@ -443,14 +466,14 @@ tbody td{{padding:0.6rem 1rem;border-bottom:1px solid #f1f5f9}}tbody tr:hover{{b
 </svg>
 </div>
 
-<h2><span class="dot"></span> 12-month drift simulation</h2>
+<h2><span class="dot"></span> 12-month drift simulation — testing the automated retraining pipeline</h2>
 <div class="card-wide"><h3>Monthly fraud rate — drift phases and retraining events</h3><div id="simChart" style="height:450px"></div>
   <p class="caption"><strong>What this tests:</strong> Criminals evolve their tactics over time. A frozen model degrades as data shifts away from its training distribution. This simulation applies progressive noise across 12 monthly windows to validate that the MLOps pipeline detects the change and retrains before performance drops.<br><br><strong>How to read:</strong> Each bar is one month's fraud rate. Color indicates the drift phase: green = stable (no drift), yellow = mild drift, orange = moderate drift, red = strong drift. Green stars mark months where the model was automatically retrained. The pipeline should retrain at or before the transition from stable to drifted data — confirming the KS test threshold works correctly.</p>
 </div>
 
 <div class="footer">
-  AML Bitcoin Fraud Detection &middot; Iman Jouhar &middot; DLBDSMTP01<br>
-  <a href="https://github.com/imanjouhar/aml-fraud-detection">GitHub Repository</a>
+  Crypto Fraud Detection &middot; Iman Jouhar &middot; DLBDSMTP01<br>
+  <a href="https://github.com/imanjouhar/crypto-fraud-detection">GitHub Repository</a>
 </div>
 
 </div>
@@ -517,14 +540,41 @@ if(pcaData.length > 0) {{
     legend:{{x:0,y:1,font:{{size:12}}}}}},cfg);
 }}
 
+// DBSCAN clustering
+const dbData = {dbscan_json};
+if(dbData.length > 0) {{
+  const clusterIds = [...new Set(dbData.map(p=>p.cl))].sort((a,b)=>a-b);
+  const palette = ['#dc2626','#2563eb','#16a34a','#d97706','#7c3aed','#ec4899','#06b6d4','#84cc16'];
+  const traces = clusterIds.map((cl,i) => {{
+    const pts = dbData.filter(p=>p.cl===cl);
+    const name = cl === -1 ? 'Noise (outliers)' : 'Cluster '+cl+' ('+pts.length+' txns)';
+    const color = cl === -1 ? '#94a3b8' : palette[i % palette.length];
+    return {{
+      x:pts.map(p=>p.x),y:pts.map(p=>p.y),z:pts.map(p=>p.z),
+      mode:'markers',name:name,type:'scatter3d',
+      marker:{{size:cl===-1?2:4,color:color,opacity:cl===-1?0.3:0.7}}
+    }};
+  }});
+  Plotly.newPlot('dbscanChart',traces,{{
+    paper_bgcolor:'transparent',plot_bgcolor:'transparent',
+    font:{{family:'DM Sans',color:'#475569',size:12}},
+    height:500,margin:{{t:0,r:0,b:0,l:0}},
+    scene:{{xaxis:{{title:'PC1',gridcolor:'#f1f5f9',backgroundcolor:'#fafafa'}},
+            yaxis:{{title:'PC2',gridcolor:'#f1f5f9',backgroundcolor:'#fafafa'}},
+            zaxis:{{title:'PC3',gridcolor:'#f1f5f9',backgroundcolor:'#fafafa'}},
+            bgcolor:'#fafafa'}},
+    legend:{{x:0,y:1,font:{{size:11}}}}
+  }},cfg);
+}}
+
 const fiL = {fi_labels};
 const fiV = {fi_values};
 if(fiL.length > 0) {{
   Plotly.newPlot('fiChart',[{{
     y:fiL.slice().reverse(),x:fiV.slice().reverse(),type:'bar',orientation:'h',
     marker:{{color:fiV.slice().reverse().map((v,i)=>i<3?'#0D9488':'#b2dfdb')}},
-    text:fiV.slice().reverse().map(v=>v.toFixed(2)),textposition:'outside',textfont:{{color:'#475569',size:11}}
-  }}],{{...L,height:450,margin:{{t:20,r:80,b:40,l:120}},xaxis:{{...L.xaxis,title:'Importance (gain)',tickformat:'.2f'}}}},cfg);
+    text:fiV.slice().reverse().map(v=>v.toFixed(1)+'%'),textposition:'outside',textfont:{{color:'#475569',size:11}}
+  }}],{{...L,height:450,margin:{{t:20,r:80,b:40,l:120}},xaxis:{{...L.xaxis,title:'Importance (%)',ticksuffix:'%'}}}},cfg);
 }}
 
 const cm = {cm_json};
