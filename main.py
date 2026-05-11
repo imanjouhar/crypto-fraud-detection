@@ -44,8 +44,6 @@ N_RAW_FEATURES  = 165
 DRIFT_FEATURES  = [f"pca_{i}" for i in range(10)] + ["time_step", "in_degree", "out_degree"]
 
 os.makedirs(MODEL_DIR, exist_ok=True)
-# ── Flask app (created at module level for Gunicorn) ──
-
 app = Flask(__name__)
 
 def banner(text):
@@ -136,7 +134,6 @@ def prepare_features(df, n_pca=N_PCA, scaler=None, pca=None, fit=True):
     X_df["out_degree"] = df["out_degree"].values
 
     return X_df, scaler, pca
-
 
 # ── Step 3: Train ──────────────────────────────────────────
 
@@ -261,6 +258,12 @@ def step_api():
         """Return API health status."""
         return jsonify({"status": "healthy"})
 
+    @app.route("/")
+    def root():
+        """Redirect root to dashboard."""
+        from flask import redirect
+        return redirect("/dashboard")
+
     @app.route("/dashboard")
     def dashboard():
         """Serve the interactive EDA dashboard with live data from model artifacts."""
@@ -296,8 +299,39 @@ def step_api():
             results.append({"is_illicit": int(proba >= 0.5), "probability": round(float(proba), 4)})
         return jsonify({"predictions": results, "count": len(results)})
 
+    @app.route("/model/info")
+    @require_key
+    def model_info():
+        """Return current model metadata."""
+        import datetime
+        model_path = os.path.join(MODEL_DIR, "aml_model.pkl")
+        mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(model_path)).isoformat()
+        best_params_path = os.path.join(MODEL_DIR, "best_params.json")
+        params = {}
+        if os.path.exists(best_params_path):
+            with open(best_params_path) as f:
+                params = json.load(f)
+        return jsonify({
+            "model": "XGBoost", "features": len(_features),
+            "pca_components": _pca.n_components_, "last_trained": mod_time,
+            "tuned_params": params
+        })
+
+    @app.route("/alerts")
+    @require_key
+    def alerts():
+        """Return drift alert history."""
+        alert_path = "data/simulated_months/drift_alerts.log"
+        if os.path.exists(alert_path):
+            with open(alert_path) as f:
+                lines = f.readlines()
+            return jsonify({"alerts": [l.strip() for l in lines], "count": len(lines)})
+        return jsonify({"alerts": [], "count": 0})
+
     print(f"  API:       http://localhost:5000/predict")
     print(f"  Dashboard: http://localhost:5000/dashboard")
+    print(f"  Alerts:    http://localhost:5000/alerts")
+    print(f"  Model:     http://localhost:5000/model/info")
     print(f"  Key: {API_KEY}")
     app.run(host="0.0.0.0", port=5000, debug=False)
 
@@ -418,7 +452,17 @@ def step_simulate():
             dr = {"drift_detected": False, "drifted_features": []}
 
         drifted  = dr["drift_detected"]
-        retrain  = drifted or True # Monthly retrain or when drifted
+        retrain = drifted or True  # Monthly scheduled + drift-triggered
+
+        # Drift alerting — log every event to alerts file
+        alert_path = os.path.join("data/simulated_months", "drift_alerts.log")
+        if drifted:
+            features_drifted = dr.get("drifted_features", [])
+            ratio = dr.get("ratio", 0)
+            alert_msg = f"[ALERT] Month {m} | DRIFT DETECTED | {ratio*100:.0f}% features shifted: {', '.join(features_drifted)}"
+            print(f"  {alert_msg}")
+            with open(alert_path, "a") as af:
+                af.write(f"{pd.Timestamp.now()} | {alert_msg}\n")
 
         print(f"  {len(chunk):,} txns | {fraud:.2f}% fraud | drift={drifted} | retrain={retrain}")
 
