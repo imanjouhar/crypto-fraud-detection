@@ -228,7 +228,7 @@ def step_api():
 
     from flask import Flask, request, jsonify, Response
 
-    app = Flask(__name__)
+    global app
     _model    = joblib.load(os.path.join(MODEL_DIR, "aml_model.pkl"))
     _features = joblib.load(os.path.join(MODEL_DIR, "feature_cols.pkl"))
     _scaler   = joblib.load(os.path.join(MODEL_DIR, "scaler.pkl"))
