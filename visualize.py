@@ -107,7 +107,54 @@ def plot_timestep(df):
     fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close()
     print(f"  saved {path}")
 
+def plot_pca_variance(pca_model):
+    """Cumulative explained variance curve for PCA components."""
+    cumvar = np.cumsum(pca_model.explained_variance_ratio_) * 100
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(range(1, len(cumvar)+1), cumvar, color="#0D9488", linewidth=2.5, marker="o", markersize=4)
+    ax.axhline(y=85, color="#EF4444", linestyle="--", alpha=0.6, label="85% threshold")
+    ax.axvline(x=30, color="#6366f1", linestyle="--", alpha=0.6, label="n=30 (selected)")
+    ax.fill_between(range(1, len(cumvar)+1), cumvar, alpha=0.08, color="#0D9488")
+    ax.set_xlabel("Number of PCA Components"); ax.set_ylabel("Cumulative Variance (%)")
+    ax.set_title("PCA — Explained Variance vs. Components"); ax.legend(); plt.tight_layout()
+    path = os.path.join(OUTPUT_DIR, "07_pca_variance.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close()
+    print(f"  saved {path}")
 
+
+def plot_split_metrics(model, X_train, y_train, X_val, y_val, X_test, y_test):
+    """Per-split classification metrics table as a figure."""
+    rows = []
+    for name, X_s, y_s in [("Train", X_train, y_train), ("Val", X_val, y_val), ("Test", X_test, y_test)]:
+        pred = model.predict(X_s)
+        proba = model.predict_proba(X_s)[:, 1]
+        rows.append([
+            name, len(y_s),
+            f"{precision_score(y_s, pred):.4f}",
+            f"{recall_score(y_s, pred):.4f}",
+            f"{f1_score(y_s, pred):.4f}",
+            f"{roc_auc_score(y_s, proba):.4f}"
+        ])
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.axis("off")
+    table = ax.table(
+        cellText=rows,
+        colLabels=["Split", "Samples", "Precision", "Recall", "F1", "ROC-AUC"],
+        cellLoc="center", loc="center"
+    )
+    table.auto_set_font_size(False); table.set_fontsize(13); table.scale(1, 2)
+    for (r, c), cell in table.get_celld().items():
+        if r == 0:
+            cell.set_facecolor("#0F1B2D"); cell.set_text_props(color="white", fontweight="bold")
+        else:
+            cell.set_facecolor("#f8fafc" if r % 2 == 0 else "white")
+        cell.set_edgecolor("#e2e8f0")
+    ax.set_title("Model Metrics — 70/15/15 Train / Val / Test", fontsize=14, fontweight="bold", pad=20)
+    plt.tight_layout()
+    path = os.path.join(OUTPUT_DIR, "08_split_metrics.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close()
+    print(f"  saved {path}")
+    
 def generate_all():
     """Generate all static charts from the trained model and dataset."""
     from main import load_elliptic, prepare_features
@@ -126,12 +173,15 @@ def generate_all():
     pca = joblib.load("models/pca.pkl")
     X, _, _ = prepare_features(df, scaler=scaler, pca=pca, fit=False)
     X_tv, X_test, y_tv, y_test = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
+    X_train, X_val, y_train, y_val = train_test_split(X_tv, y_tv, test_size=0.176, random_state=42, stratify=y_tv)
     y_pred = model.predict(X_test)
     y_proba = model.predict_proba(X_test)[:, 1]
     plot_confusion_matrix(y_test, y_pred)
     plot_roc(y_test, y_proba)
     plot_pr(y_test, y_proba)
     plot_feature_importance(model, feature_cols)
+    plot_pca_variance(pca)
+    plot_split_metrics(model, X_train, y_train, X_val, y_val, X_test, y_test)
     print(f"\n  All charts saved to {OUTPUT_DIR}/")
 
 
