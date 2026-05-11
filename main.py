@@ -415,7 +415,7 @@ def step_simulate():
             dr = {"drift_detected": False, "drifted_features": []}
 
         drifted  = dr["drift_detected"]
-        retrain  = drifted or (m % 3 == 0)
+        retrain  = drifted or True # Monthly retrain or when drifted
 
         print(f"  {len(chunk):,} txns | {fraud:.2f}% fraud | drift={drifted} | retrain={retrain}")
 
