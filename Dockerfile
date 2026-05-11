@@ -7,4 +7,4 @@ COPY models/ models/
 COPY visualizations/ visualizations/
 EXPOSE 5000
 ENV API_KEY=aml-secret-key-2024
-CMD ["python", "main.py", "api"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "120", "main:app"]
