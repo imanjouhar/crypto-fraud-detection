@@ -30,6 +30,7 @@ from sklearn.metrics import (
 from xgboost import XGBClassifier
 import mlflow, mlflow.xgboost
 import joblib
+from flask import Flask
 
 # ── Configuration ──────────────────────────────────────────
 
@@ -43,7 +44,9 @@ N_RAW_FEATURES  = 165
 DRIFT_FEATURES  = [f"pca_{i}" for i in range(10)] + ["time_step", "in_degree", "out_degree"]
 
 os.makedirs(MODEL_DIR, exist_ok=True)
+# ── Flask app (created at module level for Gunicorn) ──
 
+app = Flask(__name__)
 
 def banner(text):
     """Print a formatted section header to the console."""
