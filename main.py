@@ -15,7 +15,7 @@ python main.py tune         Auto-tune hyperparameters (Optuna)
 python main.py demo         Quick train + single prediction
 """
 
-import os, sys, json, time, csv
+import os, sys, json, time, csv, datetime
 from functools import wraps
 import pandas as pd
 import numpy as np
@@ -30,7 +30,7 @@ from sklearn.metrics import (
 from xgboost import XGBClassifier
 import mlflow, mlflow.xgboost
 import joblib
-from flask import Flask
+from flask import Flask, request, jsonify, Response, redirect
 
 # ── Configuration ──────────────────────────────────────────
 
@@ -44,7 +44,11 @@ N_RAW_FEATURES  = 165
 DRIFT_FEATURES  = [f"pca_{i}" for i in range(10)] + ["time_step", "in_degree", "out_degree"]
 
 os.makedirs(MODEL_DIR, exist_ok=True)
+
+# Flask app — defined at module level so gunicorn (main:app) finds it
+# with all routes already registered.
 app = Flask(__name__)
+
 
 def banner(text):
     """Print a formatted section header to the console."""
@@ -135,6 +139,138 @@ def prepare_features(df, n_pca=N_PCA, scaler=None, pca=None, fit=True):
 
     return X_df, scaler, pca
 
+
+# ── Model artifact loading (lazy, shared by all routes) ────
+
+_artifacts = {}
+
+def _load_artifacts():
+    """
+    Load model + scaler + PCA + feature columns once on first request.
+
+    Lazy so that importing main.py doesn't crash in environments without
+    the .pkl files (e.g. CI tests, fresh clone before training).
+    """
+    if _artifacts:
+        return _artifacts
+    _artifacts["model"]    = joblib.load(os.path.join(MODEL_DIR, "aml_model.pkl"))
+    _artifacts["features"] = joblib.load(os.path.join(MODEL_DIR, "feature_cols.pkl"))
+    _artifacts["scaler"]   = joblib.load(os.path.join(MODEL_DIR, "scaler.pkl"))
+    _artifacts["pca"]      = joblib.load(os.path.join(MODEL_DIR, "pca.pkl"))
+    return _artifacts
+
+
+def _transform(data):
+    """Apply scaler + PCA to raw input and return model-ready DataFrame."""
+    a = _load_artifacts()
+    raw = np.array([[data.get(f"feat_{i}", 0) for i in range(N_RAW_FEATURES)]])
+    X_pca = a["pca"].transform(a["scaler"].transform(raw))
+    df = pd.DataFrame(X_pca, columns=[f"pca_{i}" for i in range(X_pca.shape[1])])
+    df["time_step"]  = data.get("time_step", 0)
+    df["in_degree"]  = data.get("in_degree", 0)
+    df["out_degree"] = data.get("out_degree", 0)
+    for col in a["features"]:
+        if col not in df.columns:
+            df[col] = 0
+    return df[a["features"]]
+
+
+def require_key(f):
+    """Decorator that rejects requests without a valid API key."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if request.headers.get("X-API-Key") != API_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ── Routes (module level so gunicorn sees them) ────────────
+
+@app.route("/health")
+def health():
+    """Return API health status."""
+    return jsonify({"status": "healthy"})
+
+
+@app.route("/")
+def root():
+    """Redirect root to dashboard."""
+    return redirect("/dashboard")
+
+
+@app.route("/dashboard")
+def dashboard():
+    """Serve the interactive EDA dashboard with live data from model artifacts."""
+    try:
+        from visualize import build_dashboard_html
+        return Response(build_dashboard_html(), mimetype="text/html")
+    except Exception:
+        static_path = os.path.join("visualizations", "dashboard.html")
+        if os.path.exists(static_path):
+            with open(static_path) as f:
+                return Response(f.read(), mimetype="text/html")
+        return Response("<h1>Dashboard not ready. Run: python main.py train</h1>", mimetype="text/html")
+
+
+@app.route("/predict", methods=["POST"])
+@require_key
+def predict():
+    """Score a single transaction and return illicit probability with risk level."""
+    data = request.get_json()
+    feat = _transform(data)
+    proba = _load_artifacts()["model"].predict_proba(feat)[0][1]
+    risk = "HIGH" if proba >= 0.7 else "MEDIUM" if proba >= 0.3 else "LOW"
+    return jsonify({"is_illicit": int(proba >= 0.5), "probability": round(float(proba), 4), "risk_level": risk})
+
+
+@app.route("/predict/batch", methods=["POST"])
+@require_key
+def predict_batch():
+    """Score multiple transactions in a single request."""
+    txns = request.get_json().get("transactions", [])
+    model = _load_artifacts()["model"]
+    results = []
+    for txn in txns:
+        feat = _transform(txn)
+        proba = model.predict_proba(feat)[0][1]
+        results.append({"is_illicit": int(proba >= 0.5), "probability": round(float(proba), 4)})
+    return jsonify({"predictions": results, "count": len(results)})
+
+
+@app.route("/model/info")
+@require_key
+def model_info():
+    """Return current model metadata."""
+    a = _load_artifacts()
+    model_path = os.path.join(MODEL_DIR, "aml_model.pkl")
+    mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(model_path)).isoformat()
+    best_params_path = os.path.join(MODEL_DIR, "best_params.json")
+    params = {}
+    if os.path.exists(best_params_path):
+        with open(best_params_path) as f:
+            params = json.load(f)
+    return jsonify({
+        "model": "XGBoost",
+        "features": len(a["features"]),
+        "pca_components": a["pca"].n_components_,
+        "last_trained": mod_time,
+        "tuned_params": params,
+    })
+
+
+@app.route("/alerts")
+@require_key
+def alerts():
+    """Return drift alert history."""
+    alert_path = "data/simulated_months/drift_alerts.log"
+    if os.path.exists(alert_path):
+        with open(alert_path) as f:
+            lines = f.readlines()
+        return jsonify({"alerts": [l.strip() for l in lines], "count": len(lines)})
+    return jsonify({"alerts": [], "count": 0})
+
+
 # ── Step 3: Train ──────────────────────────────────────────
 
 def step_train():
@@ -153,8 +289,8 @@ def step_train():
 
     print("  Loading Elliptic dataset ...")
     df, _ = load_elliptic(DATA_DIR)
-    n_illicit = (df["is_illicit"]==1).sum()
-    n_licit   = (df["is_illicit"]==0).sum()
+    n_illicit = (df["is_illicit"] == 1).sum()
+    n_licit   = (df["is_illicit"] == 0).sum()
     print(f"  {len(df):,} labeled transactions | {n_illicit:,} illicit | {n_licit:,} licit | {df['is_illicit'].mean()*100:.2f}% illicit")
 
     print("  Feature engineering + PCA ...")
@@ -204,129 +340,28 @@ def step_train():
     joblib.dump(feature_cols, os.path.join(MODEL_DIR, "feature_cols.pkl"))
     joblib.dump(scaler, os.path.join(MODEL_DIR, "scaler.pkl"))
     joblib.dump(pca, os.path.join(MODEL_DIR, "pca.pkl"))
+
+    # Invalidate cached artifacts so any running server picks up the new model
+    _artifacts.clear()
+
     print(f"\n  Saved to {MODEL_DIR}/")
     return {"precision": prec, "recall": rec, "f1": f1, "auc": auc}
 
 
-# ── Step 4–5: REST API + Auth ──────────────────────────────
+# ── Step 4–5: REST API launcher (local dev only) ───────────
 
 def step_api():
     """
-    Start a Flask REST API serving the trained model.
+    Local development launcher for the Flask API.
 
-    Endpoints:
-        GET  /health         Health check (no auth).
-        POST /predict        Score a single transaction (requires X-API-Key).
-        POST /predict/batch  Score multiple transactions (requires X-API-Key).
+    In production (Render / Docker), gunicorn imports `main:app` directly,
+    so this function is NOT used in production — the routes are already
+    registered at module level above.
     """
-    banner("Step 4 – REST API")
+    banner("Step 4 – REST API (local dev)")
     if not os.path.exists(os.path.join(MODEL_DIR, "aml_model.pkl")):
-        print("No model found. Run: python main.py train"); sys.exit(1)
-
-    from flask import Flask, request, jsonify, Response
-
-    global app
-    _model    = joblib.load(os.path.join(MODEL_DIR, "aml_model.pkl"))
-    _features = joblib.load(os.path.join(MODEL_DIR, "feature_cols.pkl"))
-    _scaler   = joblib.load(os.path.join(MODEL_DIR, "scaler.pkl"))
-    _pca      = joblib.load(os.path.join(MODEL_DIR, "pca.pkl"))
-
-    def require_key(f):
-        """Decorator that rejects requests without a valid API key."""
-        @wraps(f)
-        def decorated(*args, **kwargs):
-            if request.headers.get("X-API-Key") != API_KEY:
-                return jsonify({"error": "Unauthorized"}), 401
-            return f(*args, **kwargs)
-        return decorated
-
-    def transform(data):
-        """Apply scaler + PCA to raw input and return model-ready DataFrame."""
-        raw = np.array([[data.get(f"feat_{i}", 0) for i in range(N_RAW_FEATURES)]])
-        X_pca = _pca.transform(_scaler.transform(raw))
-        df = pd.DataFrame(X_pca, columns=[f"pca_{i}" for i in range(X_pca.shape[1])])
-        df["time_step"]  = data.get("time_step", 0)
-        df["in_degree"]  = data.get("in_degree", 0)
-        df["out_degree"] = data.get("out_degree", 0)
-        for col in _features:
-            if col not in df.columns:
-                df[col] = 0
-        return df[_features]
-
-    @app.route("/health")
-    def health():
-        """Return API health status."""
-        return jsonify({"status": "healthy"})
-
-    @app.route("/")
-    def root():
-        """Redirect root to dashboard."""
-        from flask import redirect
-        return redirect("/dashboard")
-
-    @app.route("/dashboard")
-    def dashboard():
-        """Serve the interactive EDA dashboard with live data from model artifacts."""
-        try:
-            from visualize import build_dashboard_html
-            return Response(build_dashboard_html(), mimetype="text/html")
-        except Exception:
-            static_path = os.path.join("visualizations", "dashboard.html")
-            if os.path.exists(static_path):
-                with open(static_path) as f:
-                    return Response(f.read(), mimetype="text/html")
-            return Response("<h1>Dashboard not ready. Run: python main.py train</h1>", mimetype="text/html")
-
-    @app.route("/predict", methods=["POST"])
-    @require_key
-    def predict():
-        """Score a single transaction and return illicit probability with risk level."""
-        data = request.get_json()
-        feat = transform(data)
-        proba = _model.predict_proba(feat)[0][1]
-        risk = "HIGH" if proba >= 0.7 else "MEDIUM" if proba >= 0.3 else "LOW"
-        return jsonify({"is_illicit": int(proba >= 0.5), "probability": round(float(proba), 4), "risk_level": risk})
-
-    @app.route("/predict/batch", methods=["POST"])
-    @require_key
-    def predict_batch():
-        """Score multiple transactions in a single request."""
-        txns = request.get_json().get("transactions", [])
-        results = []
-        for txn in txns:
-            feat = transform(txn)
-            proba = _model.predict_proba(feat)[0][1]
-            results.append({"is_illicit": int(proba >= 0.5), "probability": round(float(proba), 4)})
-        return jsonify({"predictions": results, "count": len(results)})
-
-    @app.route("/model/info")
-    @require_key
-    def model_info():
-        """Return current model metadata."""
-        import datetime
-        model_path = os.path.join(MODEL_DIR, "aml_model.pkl")
-        mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(model_path)).isoformat()
-        best_params_path = os.path.join(MODEL_DIR, "best_params.json")
-        params = {}
-        if os.path.exists(best_params_path):
-            with open(best_params_path) as f:
-                params = json.load(f)
-        return jsonify({
-            "model": "XGBoost", "features": len(_features),
-            "pca_components": _pca.n_components_, "last_trained": mod_time,
-            "tuned_params": params
-        })
-
-    @app.route("/alerts")
-    @require_key
-    def alerts():
-        """Return drift alert history."""
-        alert_path = "data/simulated_months/drift_alerts.log"
-        if os.path.exists(alert_path):
-            with open(alert_path) as f:
-                lines = f.readlines()
-            return jsonify({"alerts": [l.strip() for l in lines], "count": len(lines)})
-        return jsonify({"alerts": [], "count": 0})
+        print("No model found. Run: python main.py train")
+        sys.exit(1)
 
     print(f"  API:       http://localhost:5000/predict")
     print(f"  Dashboard: http://localhost:5000/dashboard")
@@ -439,8 +474,10 @@ def step_simulate():
         else:
             s = rng.uniform(0.5, 2.0, nf)
             chunk[fcol] = chunk[fcol].values * s + rng.normal(0, 1.5, (len(chunk), nf))
-            n_flip = max(1, int(len(chunk[chunk["is_illicit"]==0]) * 0.02))
-            idx = chunk[chunk["is_illicit"]==0].sample(n=min(n_flip, len(chunk[chunk["is_illicit"]==0])), random_state=42+m).index
+            n_flip = max(1, int(len(chunk[chunk["is_illicit"] == 0]) * 0.02))
+            idx = chunk[chunk["is_illicit"] == 0].sample(
+                n=min(n_flip, len(chunk[chunk["is_illicit"] == 0])), random_state=42 + m
+            ).index
             chunk.loc[idx, "is_illicit"] = 1
 
         fraud = chunk["is_illicit"].mean() * 100
@@ -473,7 +510,7 @@ def step_simulate():
             pca_obj = joblib.load(os.path.join(MODEL_DIR, "pca.pkl"))
 
         summary.append({"month": m, "transactions": len(chunk), "fraud_rate_pct": round(fraud, 2),
-                         "drift_detected": drifted, "retrained": retrain})
+                        "drift_detected": drifted, "retrained": retrain})
 
     with open(os.path.join(out_dir, "simulation_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
@@ -502,6 +539,7 @@ def step_visualize():
     check_dataset()
     from visualize import generate_all
     generate_all()
+
 
 def step_dashboard():
     """Generate charts and open the interactive HTML dashboard in a browser."""
@@ -536,8 +574,8 @@ def test_predict():
     try:
         r = requests.post("http://localhost:5000/predict", json=txn, headers={"X-API-Key": API_KEY}, timeout=5)
         print(json.dumps(r.json(), indent=2))
-    except Exception as e:
-        print(f"API not running. Start with: python main.py api")
+    except Exception:
+        print("API not running. Start with: python main.py api")
 
 
 # ── Auto-tuning (Optuna) ───────────────────────────────────
@@ -595,13 +633,11 @@ def step_tune():
     print(f"\n  Best F1: {study.best_value:.4f}")
     print(f"  Best params: {json.dumps(best, indent=2)}")
 
-    # Save best params
     best_path = os.path.join(MODEL_DIR, "best_params.json")
     with open(best_path, "w") as f:
         json.dump(best, f, indent=2)
     print(f"  Saved to {best_path}")
 
-    # Retrain with best params
     print("\n  Retraining with best params ...")
     best["scale_pos_weight"] = ratio
     best["eval_metric"] = "aucpr"
@@ -635,6 +671,7 @@ def step_tune():
     joblib.dump(feature_cols, os.path.join(MODEL_DIR, "feature_cols.pkl"))
     joblib.dump(scaler, os.path.join(MODEL_DIR, "scaler.pkl"))
     joblib.dump(pca, os.path.join(MODEL_DIR, "pca.pkl"))
+    _artifacts.clear()
     print(f"\n  Tuned model saved to {MODEL_DIR}/")
     return {"precision": prec, "recall": rec, "f1": f1, "auc": auc}
 
@@ -645,12 +682,10 @@ def step_send():
     """Simulate live Bitcoin transaction streaming to the running API."""
     banner("Sender – streaming transactions to API")
     import requests as req
-    import csv, time
 
     log_path = "visualizations/predictions_log.csv"
     os.makedirs("visualizations", exist_ok=True)
 
-    # Generate test transactions
     txns = []
     data_path = os.path.join(DATA_DIR, "elliptic_txs_features.csv")
     if os.path.exists(data_path):
@@ -658,7 +693,9 @@ def step_send():
         df.columns = ["txId", "time_step"] + [f"feat_{i}" for i in range(N_RAW_FEATURES)]
         for _, row in df.iterrows():
             txn = {f"feat_{i}": round(float(row[f"feat_{i}"]), 3) for i in range(N_RAW_FEATURES)}
-            txn.update({"time_step": int(row["time_step"]), "in_degree": int(np.random.randint(0, 10)), "out_degree": int(np.random.randint(0, 10))})
+            txn.update({"time_step": int(row["time_step"]),
+                        "in_degree": int(np.random.randint(0, 10)),
+                        "out_degree": int(np.random.randint(0, 10))})
             txns.append(txn)
     else:
         for _ in range(20):
@@ -680,10 +717,12 @@ def step_send():
             if r.status_code == 200:
                 res = r.json()
                 writer.writerow([i, res["is_illicit"], res["probability"], res["risk_level"], ms])
-                if res["is_illicit"]: flagged += 1
+                if res["is_illicit"]:
+                    flagged += 1
                 print(f"  [{i+1:>3}/{len(txns)}] {'ILLICIT' if res['is_illicit'] else 'licit':>7} | prob={res['probability']:.3f} | {res['risk_level']:<6} | {ms}ms")
         except req.ConnectionError:
-            print(f"  API not running. Start with: python main.py api"); break
+            print("  API not running. Start with: python main.py api")
+            break
         time.sleep(0.2)
 
     log.close()
@@ -699,10 +738,13 @@ def step_test():
 
     def check(name, ok):
         nonlocal passed, failed
-        if ok: passed += 1; print(f"  PASS  {name}")
-        else: failed += 1; print(f"  FAIL  {name}")
+        if ok:
+            passed += 1
+            print(f"  PASS  {name}")
+        else:
+            failed += 1
+            print(f"  FAIL  {name}")
 
-    # Model artifacts
     print("\n  -- Model --")
     for f in ["models/aml_model.pkl", "models/feature_cols.pkl", "models/scaler.pkl", "models/pca.pkl"]:
         check(f, os.path.exists(f))
@@ -710,34 +752,31 @@ def step_test():
         m = joblib.load("models/aml_model.pkl")
         check("Model has predict_proba", hasattr(m, "predict_proba"))
 
-    # Baseline
     print("\n  -- Drift baseline --")
     bp = "models/baseline_stats.json"
     check("Baseline exists", os.path.exists(bp))
     if os.path.exists(bp):
-        with open(bp) as f: d = json.load(f)
+        with open(bp) as f:
+            d = json.load(f)
         check(f"Baseline has {len(d)} features", len(d) > 0)
 
-    # Visualizations
     print("\n  -- Outputs --")
     for f in ["visualizations/dashboard.html", "visualizations/01_class_distribution.png", "visualizations/03_roc_curve.png"]:
         check(f, os.path.exists(f))
 
-    # Simulation
     print("\n  -- Simulation --")
     sp = "data/simulated_months/simulation_summary.json"
     check("Simulation summary", os.path.exists(sp))
     if os.path.exists(sp):
-        with open(sp) as f: s = json.load(f)
+        with open(sp) as f:
+            s = json.load(f)
         check(f"{len(s)} months simulated", len(s) == 12)
 
-    # CI/CD
     print("\n  -- Infrastructure --")
     check("GitHub Actions workflow", os.path.exists(".github/workflows/retrain.yml"))
     check("Dockerfile", os.path.exists("Dockerfile"))
     check("docker-compose.yml", os.path.exists("docker-compose.yml"))
 
-    # API (if running)
     print("\n  -- API --")
     try:
         import requests as req
