@@ -19,49 +19,81 @@ jobs:
     outputs:
       drift_detected: ${{ steps.drift.outputs.drift_detected }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - run: pip install -r requirements.txt
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
       - id: drift
         run: |
-          python -c "
-          from main import load_elliptic, prepare_features, detect_drift
-          import joblib
-          df, _ = load_elliptic()
-          scaler = joblib.load('models/scaler.pkl')
-          pca = joblib.load('models/pca.pkl')
-          X, _, _ = prepare_features(df, scaler=scaler, pca=pca, fit=False)
-          result = detect_drift(X)
-          print('drift_detected=' + str(result['drift_detected']))
-          " >> $GITHUB_OUTPUT
+          cat > _ci_drift.py <<'PYEOF'
+          import os, sys
+
+          def emit(value):
+              # Write ONLY the boolean to the step output, nothing else.
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("drift_detected=%s\n" % value)
+
+          try:
+              import joblib
+              from main import load_elliptic, prepare_features, detect_drift
+
+              # If model artifacts are missing on the runner, we must retrain.
+              if not (os.path.exists("models/scaler.pkl") and os.path.exists("models/pca.pkl")):
+                  print("Model artifacts missing -> retrain", file=sys.stderr)
+                  emit("true")
+                  sys.exit(0)
+
+              df, _ = load_elliptic()
+              scaler = joblib.load("models/scaler.pkl")
+              pca = joblib.load("models/pca.pkl")
+              X, _, _ = prepare_features(df, scaler=scaler, pca=pca, fit=False)
+              result = detect_drift(X)
+              drift = bool(result.get("drift_detected", False))
+
+              # Human-readable logs go to stderr so they don't corrupt GITHUB_OUTPUT.
+              print("Drift result:", result, file=sys.stderr)
+              emit("true" if drift else "false")
+          except Exception as e:
+              # Never fail the pipeline on the check itself: be conservative and retrain.
+              print("Drift check error:", e, file=sys.stderr)
+              emit("true")
+          PYEOF
+          python _ci_drift.py
 
   retrain:
     needs: drift-check
     runs-on: ubuntu-latest
-    if: |
-      needs.drift-check.outputs.drift_detected == 'True' ||
+    permissions:
+      contents: write
+    if: >-
+      needs.drift-check.outputs.drift_detected == 'true' ||
       github.event.inputs.force_retrain == 'true' ||
-      github.event.schedule != ''
+      github.event_name == 'schedule'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - run: pip install -r requirements.txt
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
       - run: python main.py train
       - run: python main.py baseline
-      - run: |
-          python -c "
+      - name: Validate model
+        run: |
+          python - <<'PYEOF'
           import joblib
-          model = joblib.load('models/aml_model.pkl')
-          features = joblib.load('models/feature_cols.pkl')
-          print(f'Model OK - {len(features)} features')
-          "
-      - run: |
+          model = joblib.load("models/aml_model.pkl")
+          features = joblib.load("models/feature_cols.pkl")
+          print("Model OK - %d features" % len(features))
+          PYEOF
+      - name: Commit retrained model
+        run: |
           git config user.name "github-actions[bot]"
-          git config user.email "actions@github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add models/
           git diff --staged --quiet || git commit -m "retrain model [$(date +%Y-%m-%d)]"
           git push
@@ -70,13 +102,26 @@ jobs:
     needs: retrain
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: docker build -t aml-fraud-api:latest .
-      - run: |
+      - name: Smoke test
+        run: |
           docker run -d --name aml-test -p 5000:5000 aml-fraud-api:latest
-          sleep 5
-          curl -f http://localhost:5000/health || exit 1
-          docker stop aml-test
-          echo "Smoke test passed"
+          ok=0
+          for i in $(seq 1 15); do
+            if curl -fs http://localhost:5000/health > /dev/null; then
+              echo "Health check passed"
+              ok=1
+              break
+            fi
+            echo "Waiting for API to start... ($i)"
+            sleep 2
+          done
+          docker logs aml-test || true
+          docker rm -f aml-test
+          if [ "$ok" != "1" ]; then
+            echo "Health check failed"
+            exit 1
+          fi
       - name: Deploy to Render
-        run: curl -s "${{ secrets.RENDER_DEPLOY_HOOK }}"
+        run: curl -fsS "${{ secrets.RENDER_DEPLOY_HOOK }}"
