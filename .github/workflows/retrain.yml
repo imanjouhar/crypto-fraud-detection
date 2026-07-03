@@ -40,7 +40,7 @@ jobs:
               import joblib
               from main import load_elliptic, prepare_features, detect_drift
 
-              # If model artifacts are missing on the runner, we must retrain.
+              # If model artifacts are missing on the runner, retrain.
               if not (os.path.exists("models/scaler.pkl") and os.path.exists("models/pca.pkl")):
                   print("Model artifacts missing -> retrain", file=sys.stderr)
                   emit("true")
