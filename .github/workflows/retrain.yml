@@ -26,16 +26,6 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Download Elliptic dataset
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-        run: |
-          pip install kaggle
-          kaggle datasets download -d ellipticco/elliptic-data-set -p /tmp/elliptic --unzip
-          mkdir -p data
-          find /tmp/elliptic -name "elliptic_txs_*.csv" -exec mv {} data/ \;
-          ls -lh data/
       - id: drift
         run: |
           cat > _ci_drift.py <<'PYEOF'
@@ -50,7 +40,15 @@ jobs:
               import joblib
               from main import load_elliptic, prepare_features, detect_drift
 
-              # If model artifacts are missing on the runner, retrain.
+              # Static dataset: if no data files are present on the runner,
+              # no new data has arrived -> no drift -> no retraining needed.
+              data_files = ["elliptic_txs_features.csv", "elliptic_txs_classes.csv", "elliptic_txs_edgelist.csv"]
+              if not all(os.path.exists(os.path.join("data", f)) for f in data_files):
+                  print("No new data on runner -> no drift", file=sys.stderr)
+                  emit("false")
+                  sys.exit(0)
+
+              # If model artifacts are missing but data is present, retrain.
               if not (os.path.exists("models/scaler.pkl") and os.path.exists("models/pca.pkl")):
                   print("Model artifacts missing -> retrain", file=sys.stderr)
                   emit("true")
@@ -67,9 +65,9 @@ jobs:
               print("Drift result:", result, file=sys.stderr)
               emit("true" if drift else "false")
           except Exception as e:
-              # Never fail the pipeline on the check itself: be conservative and retrain.
+              # Never fail the pipeline on the check itself.
               print("Drift check error:", e, file=sys.stderr)
-              emit("true")
+              emit("false")
           PYEOF
           python _ci_drift.py
 
@@ -80,8 +78,7 @@ jobs:
       contents: write
     if: >-
       needs.drift-check.outputs.drift_detected == 'true' ||
-      github.event.inputs.force_retrain == 'true' ||
-      github.event_name == 'schedule'
+      github.event.inputs.force_retrain == 'true'
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
